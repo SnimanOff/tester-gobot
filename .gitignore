@@ -1,0 +1,12 @@
+instructions.ai
+
+.env
+
+data/
+
+/tester-bot
+/tester-bot.exe
+*.exe
+
+.idea/
+.vscode/
