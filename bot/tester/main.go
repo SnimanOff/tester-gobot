@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/SnimanOff/testbot-platform/bot/tester/router"
+	"github.com/SnimanOff/testbot-platform/database"
 	telegram "github.com/go-telegram/bot"
 )
 
@@ -26,6 +27,17 @@ func run() error {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	mainDatabase, err := database.Open(ctx, database.ConnectionOptions{
+		Address:  settings.RedisAddress,
+		Password: settings.RedisPassword,
+		Database: settings.RedisDatabase,
+	})
+	if err != nil {
+		return fmt.Errorf("open main database: %w", err)
+	}
+	defer mainDatabase.Close()
+	fmt.Println("database is started")
 
 	tgBot, err := telegram.New(settings.TesterBotToken)
 	if err != nil {

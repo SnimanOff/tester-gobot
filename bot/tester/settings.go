@@ -13,6 +13,10 @@ import (
 type Settings struct {
 	TesterBotToken  string
 	OwnerTelegramID int64
+
+	RedisAddress  string
+	RedisPassword string
+	RedisDatabase int
 }
 
 func loadSettings() (*Settings, error) {
@@ -24,6 +28,10 @@ func loadSettings() (*Settings, error) {
 	loadedSettings := &Settings{
 		TesterBotToken:  reader.requiredString("TESTER_BOT_TOKEN"),
 		OwnerTelegramID: reader.requiredInt64("OWNER_TELEGRAM_ID"),
+
+		RedisAddress:  reader.optionalString("REDIS_ADDR", "localhost:6379"),
+		RedisPassword: reader.optionalString("REDIS_PASSWORD", ""),
+		RedisDatabase: int(reader.optionalInt64("REDIS_DB", 0)),
 	}
 
 	if len(reader.problems) > 0 {
@@ -44,10 +52,26 @@ func (reader *environmentReader) requiredString(variableName string) string {
 	return variableValue
 }
 
+func (reader *environmentReader) optionalString(variableName, defaultValue string) string {
+	variableValue := strings.TrimSpace(os.Getenv(variableName))
+	if variableValue == "" {
+		return defaultValue
+	}
+	return variableValue
+}
+
 func (reader *environmentReader) requiredInt64(variableName string) int64 {
 	variableValue := reader.requiredString(variableName)
 	if variableValue == "" {
 		return 0
+	}
+	return reader.parseInt64(variableName, variableValue)
+}
+
+func (reader *environmentReader) optionalInt64(variableName string, defaultValue int64) int64 {
+	variableValue := strings.TrimSpace(os.Getenv(variableName))
+	if variableValue == "" {
+		return defaultValue
 	}
 	return reader.parseInt64(variableName, variableValue)
 }
