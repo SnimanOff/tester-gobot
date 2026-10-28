@@ -10,6 +10,7 @@ import (
 
 	"github.com/SnimanOff/testbot-platform/bot/tester/router"
 	"github.com/SnimanOff/testbot-platform/database"
+	"github.com/SnimanOff/testbot-platform/database/repositories"
 	telegram "github.com/go-telegram/bot"
 )
 
@@ -39,6 +40,11 @@ func run() error {
 	defer mainDatabase.Close()
 	fmt.Println("database is started")
 
+	userRepository := repositories.NewUserRepository(mainDatabase)
+	if err := userRepository.SetAdmin(ctx, settings.OwnerTelegramID, true); err != nil {
+		return fmt.Errorf("set owner admin: %w", err)
+	}
+
 	tgBot, err := telegram.New(settings.TesterBotToken)
 	if err != nil {
 		return fmt.Errorf("create telegram bot: %w", err)
@@ -49,7 +55,10 @@ func run() error {
 		return fmt.Errorf("get tester bot info: %w", err)
 	}
 
-	router.Register(tgBot)
+	router.Register(tgBot, router.Dependencies{
+		UserRepository:  userRepository,
+		OwnerTelegramID: settings.OwnerTelegramID,
+	})
 
 	fmt.Printf("Bot @%s is started\n", testerUser.Username)
 	tgBot.Start(ctx)
