@@ -1,15 +1,21 @@
 package router
 
 import (
+	"github.com/SnimanOff/testbot-platform/bot/children/launcher"
 	"github.com/SnimanOff/testbot-platform/bot/tester/commands"
 	"github.com/SnimanOff/testbot-platform/bot/tester/middleware"
 	"github.com/SnimanOff/testbot-platform/database/repositories"
 	telegram "github.com/go-telegram/bot"
+	"github.com/go-telegram/bot/models"
 )
 
 type Dependencies struct {
-	UserRepository  *repositories.UserRepository
-	OwnerTelegramID int64
+	UserRepository   *repositories.UserRepository
+	ChildRepository  *repositories.ChildBotRepository
+	ChildLauncher    *launcher.Launcher
+	OwnerTelegramID  int64
+	ChildBotUsername string
+	MaxArchiveBytes  int64
 }
 
 func Register(tgBot *telegram.Bot, dependencies Dependencies) {
@@ -45,5 +51,13 @@ func Register(tgBot *telegram.Bot, dependencies Dependencies) {
 		telegram.MatchTypeCommandStartOnly,
 		commands.RemoveAdminCommand(dependencies.UserRepository, dependencies.OwnerTelegramID),
 		onlyOwner,
+	)
+
+	tgBot.RegisterHandlerMatchFunc(
+		func(update *models.Update) bool {
+			return update.Message != nil && update.Message.Document != nil
+		},
+		commands.UploadArchiveCommand(dependencies.ChildLauncher, dependencies.MaxArchiveBytes, dependencies.ChildBotUsername),
+		onlyAdmins,
 	)
 }

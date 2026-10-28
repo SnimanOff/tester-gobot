@@ -6,18 +6,41 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 )
 
 type Settings struct {
 	TesterBotToken  string
+	ChildBotToken   string
 	OwnerTelegramID int64
 
 	RedisAddress  string
 	RedisPassword string
 	RedisDatabase int
+
+	ChildRedisAddress  string
+	ChildRedisPassword string
+	ChildRedisDatabase int
+	ChildRunUID        int
+	ChildRunGID        int
+
+	ChildrenDirectory   string
+	MaxArchiveBytes     int64
+	MaxUnpackedBytes    int64
+	MaxArchiveFiles     int
+	MaxCompressionRatio int64
+	ChildBuildTimeout   time.Duration
+	ChildStartupCheck   time.Duration
 }
+
+const bytesInMegabyte = 1024 * 1024
+
+var (
+	ErrorSameBotTokens     = errors.New("CHILD_BOT_TOKEN must differ from TESTER_BOT_TOKEN")
+	ErrorSameRedisDatabase = errors.New("child bots need a separate database: set another CHILD_REDIS_ADDR or CHILD_REDIS_DB")
+)
 
 func loadSettings() (*Settings, error) {
 	if err := godotenv.Load(); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -27,15 +50,37 @@ func loadSettings() (*Settings, error) {
 	reader := &environmentReader{}
 	loadedSettings := &Settings{
 		TesterBotToken:  reader.requiredString("TESTER_BOT_TOKEN"),
+		ChildBotToken:   reader.requiredString("CHILD_BOT_TOKEN"),
 		OwnerTelegramID: reader.requiredInt64("OWNER_TELEGRAM_ID"),
 
 		RedisAddress:  reader.optionalString("REDIS_ADDR", "localhost:6379"),
 		RedisPassword: reader.optionalString("REDIS_PASSWORD", ""),
 		RedisDatabase: int(reader.optionalInt64("REDIS_DB", 0)),
+
+		ChildRedisAddress:  reader.optionalString("CHILD_REDIS_ADDR", "localhost:6380"),
+		ChildRedisPassword: reader.optionalString("CHILD_REDIS_PASSWORD", ""),
+		ChildRedisDatabase: int(reader.optionalInt64("CHILD_REDIS_DB", 0)),
+		ChildRunUID:        int(reader.optionalInt64("CHILD_RUN_UID", -1)),
+		ChildRunGID:        int(reader.optionalInt64("CHILD_RUN_GID", -1)),
+
+		ChildrenDirectory:   reader.optionalString("CHILDREN_DIR", "./data/children"),
+		MaxArchiveBytes:     reader.optionalInt64("MAX_ARCHIVE_SIZE_MB", 20) * bytesInMegabyte,
+		MaxUnpackedBytes:    reader.optionalInt64("MAX_UNPACKED_SIZE_MB", 100) * bytesInMegabyte,
+		MaxArchiveFiles:     int(reader.optionalInt64("MAX_ARCHIVE_FILES", 1000)),
+		MaxCompressionRatio: reader.optionalInt64("MAX_COMPRESSION_RATIO", 100),
+		ChildBuildTimeout:   time.Duration(reader.optionalInt64("CHILD_BUILD_TIMEOUT_SECONDS", 180)) * time.Second,
+		ChildStartupCheck:   time.Duration(reader.optionalInt64("CHILD_STARTUP_CHECK_SECONDS", 10)) * time.Second,
 	}
 
 	if len(reader.problems) > 0 {
 		return nil, fmt.Errorf("invalid settings: %s", strings.Join(reader.problems, "; "))
+	}
+	if loadedSettings.TesterBotToken == loadedSettings.ChildBotToken {
+		return nil, ErrorSameBotTokens
+	}
+	if loadedSettings.RedisAddress == loadedSettings.ChildRedisAddress &&
+		loadedSettings.RedisDatabase == loadedSettings.ChildRedisDatabase {
+		return nil, ErrorSameRedisDatabase
 	}
 	return loadedSettings, nil
 }
