@@ -39,6 +39,22 @@ func Register(tgBot *telegram.Bot, dependencies Dependencies) {
 
 	tgBot.RegisterHandler(
 		telegram.HandlerTypeMessageText,
+		"status",
+		telegram.MatchTypeCommandStartOnly,
+		commands.ChildStatusCommand(dependencies.ChildRepository, dependencies.ChildLauncher, dependencies.ChildBotUsername),
+		onlyAdmins,
+	)
+
+	tgBot.RegisterHandler(
+		telegram.HandlerTypeMessageText,
+		"stop",
+		telegram.MatchTypeCommandStartOnly,
+		commands.StopChildCommand(dependencies.ChildLauncher, dependencies.OwnerTelegramID),
+		onlyAdmins,
+	)
+
+	tgBot.RegisterHandler(
+		telegram.HandlerTypeMessageText,
 		"add_admin",
 		telegram.MatchTypeCommandStartOnly,
 		commands.AddAdminCommand(dependencies.UserRepository),
