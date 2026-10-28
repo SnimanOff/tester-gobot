@@ -14,6 +14,7 @@ type Dependencies struct {
 
 func Register(tgBot *telegram.Bot, dependencies Dependencies) {
 	onlyAdmins := middleware.OnlyAdmins(dependencies.UserRepository)
+	onlyOwner := middleware.OnlyOwner(dependencies.OwnerTelegramID)
 
 	tgBot.RegisterHandler(
 		telegram.HandlerTypeMessageText,
@@ -28,5 +29,21 @@ func Register(tgBot *telegram.Bot, dependencies Dependencies) {
 		telegram.MatchTypeCommandStartOnly,
 		commands.ListAdminsCommand(dependencies.UserRepository, dependencies.OwnerTelegramID),
 		onlyAdmins,
+	)
+
+	tgBot.RegisterHandler(
+		telegram.HandlerTypeMessageText,
+		"add_admin",
+		telegram.MatchTypeCommandStartOnly,
+		commands.AddAdminCommand(dependencies.UserRepository),
+		onlyOwner,
+	)
+
+	tgBot.RegisterHandler(
+		telegram.HandlerTypeMessageText,
+		"remove_admin",
+		telegram.MatchTypeCommandStartOnly,
+		commands.RemoveAdminCommand(dependencies.UserRepository, dependencies.OwnerTelegramID),
+		onlyOwner,
 	)
 }
