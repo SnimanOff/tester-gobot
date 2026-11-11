@@ -1,0 +1,59 @@
+services:
+  redis:
+    image: redis:7.4-alpine
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  child-redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    networks:
+      - default
+      - children
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  tester-bot:
+    build: .
+    environment:
+      TESTER_BOT_TOKEN: ${TESTER_BOT_TOKEN:?set TESTER_BOT_TOKEN}
+      CHILD_BOTS_LIMIT: ${CHILD_BOTS_LIMIT:-3}
+      CHILD_CONTAINER_PREFIX: ${COMPOSE_PROJECT_NAME}
+      OWNER_TELEGRAM_ID: ${OWNER_TELEGRAM_ID:?set OWNER_TELEGRAM_ID}
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+      CHILD_REDIS_ADDR: child-redis:6379
+      CHILD_RUN_UID: "10001"
+      CHILD_RUN_GID: "10001"
+      CHILDREN_DIR: /app/data/children
+    depends_on:
+      redis:
+        condition: service_healthy
+      child-redis:
+        condition: service_healthy
+    volumes:
+      - children-data:/app/data
+      - child-go-cache:/var/lib/childbot
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+networks:
+  children:
+
+volumes:
+  redis-data:
+  children-data:
+  child-go-cache:

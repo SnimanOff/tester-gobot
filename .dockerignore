@@ -1,5 +1,8 @@
 .git
 .env
+.env.*
+*.env
+.tmp-go-cache
 instructions.ai
 data
 examples

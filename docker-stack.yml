@@ -1,0 +1,49 @@
+version: "3.8"
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+    volumes:
+      - redis-data:/data
+
+  child-redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    networks:
+      - default
+      - children
+
+  tester-bot:
+    image: ${TESTER_IMAGE:-testbot-platform:local}
+    environment:
+      TESTER_BOT_TOKEN: ${TESTER_BOT_TOKEN:?set TESTER_BOT_TOKEN}
+      CHILD_BOTS_LIMIT: ${CHILD_BOTS_LIMIT:-3}
+      CHILD_CONTAINER_PREFIX: ${STACK_NAME:-testbot}
+      OWNER_TELEGRAM_ID: ${OWNER_TELEGRAM_ID:?set OWNER_TELEGRAM_ID}
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+      CHILD_REDIS_ADDR: child-redis:6379
+      CHILD_RUN_UID: "10001"
+      CHILD_RUN_GID: "10001"
+      CHILDREN_DIR: /app/data/children
+    volumes:
+      - children-data:/app/data
+      - child-go-cache:/var/lib/childbot
+      - /var/run/docker.sock:/var/run/docker.sock
+    deploy:
+      restart_policy:
+        condition: any
+        delay: 5s
+
+networks:
+  children:
+    driver: overlay
+    attachable: true
+
+volumes:
+  redis-data:
+  children-data:
+  child-go-cache:
