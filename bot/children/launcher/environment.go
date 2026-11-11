@@ -45,10 +45,10 @@ func buildEnvironment(hasModuleFile bool) []string {
 }
 
 func childEnvironment(childBotToken string, childRedis ChildRedis) []string {
-	return append(inheritedEnvironment(),
-		"BOT_TOKEN="+childBotToken,
-		"REDIS_ADDR="+childRedis.Address,
-		"REDIS_PASSWORD="+childRedis.Password,
-		"REDIS_DB="+strconv.Itoa(childRedis.Database),
-	)
+	return []string{
+		"BOT_TOKEN=" + childBotToken,
+		"REDIS_ADDR=" + childRedis.Address,
+		"REDIS_PASSWORD=" + childRedis.Password,
+		"REDIS_DB=" + strconv.Itoa(childRedis.Database),
+	}
 }

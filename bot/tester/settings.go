@@ -13,7 +13,7 @@ import (
 
 type Settings struct {
 	TesterBotToken  string
-	ChildBotToken   string
+	ChildBotsLimit  int
 	OwnerTelegramID int64
 
 	RedisAddress  string
@@ -26,6 +26,11 @@ type Settings struct {
 	ChildRunUID        int
 	ChildRunGID        int
 
+	ChildContainerPrefix string
+	ChildMemory          string
+	ChildCPUs            string
+	ChildPidsLimit       int
+
 	ChildrenDirectory   string
 	MaxArchiveBytes     int64
 	MaxUnpackedBytes    int64
@@ -35,11 +40,14 @@ type Settings struct {
 	ChildStartupCheck   time.Duration
 }
 
-const bytesInMegabyte = 1024 * 1024
+const (
+	bytesInMegabyte    = 1024 * 1024
+	redisDatabaseCount = 16
+)
 
 var (
-	ErrorSameBotTokens     = errors.New("CHILD_BOT_TOKEN must differ from TESTER_BOT_TOKEN")
 	ErrorSameRedisDatabase = errors.New("child bots need a separate database: set another CHILD_REDIS_ADDR or CHILD_REDIS_DB")
+	ErrorTooManyChildren   = errors.New("CHILD_BOTS_LIMIT must be from 1 and CHILD_REDIS_DB plus CHILD_BOTS_LIMIT must not exceed 16")
 )
 
 func loadSettings() (*Settings, error) {
@@ -50,7 +58,7 @@ func loadSettings() (*Settings, error) {
 	reader := &environmentReader{}
 	loadedSettings := &Settings{
 		TesterBotToken:  reader.requiredString("TESTER_BOT_TOKEN"),
-		ChildBotToken:   reader.requiredString("CHILD_BOT_TOKEN"),
+		ChildBotsLimit:  int(reader.optionalInt64("CHILD_BOTS_LIMIT", 3)),
 		OwnerTelegramID: reader.requiredInt64("OWNER_TELEGRAM_ID"),
 
 		RedisAddress:  reader.optionalString("REDIS_ADDR", "localhost:6379"),
@@ -62,6 +70,11 @@ func loadSettings() (*Settings, error) {
 		ChildRedisDatabase: int(reader.optionalInt64("CHILD_REDIS_DB", 0)),
 		ChildRunUID:        int(reader.optionalInt64("CHILD_RUN_UID", -1)),
 		ChildRunGID:        int(reader.optionalInt64("CHILD_RUN_GID", -1)),
+
+		ChildContainerPrefix: reader.optionalString("CHILD_CONTAINER_PREFIX", ""),
+		ChildMemory:          reader.optionalString("CHILD_MEMORY", "128m"),
+		ChildCPUs:            reader.optionalString("CHILD_CPUS", "0.5"),
+		ChildPidsLimit:       int(reader.optionalInt64("CHILD_PIDS_LIMIT", 64)),
 
 		ChildrenDirectory:   reader.optionalString("CHILDREN_DIR", "./data/children"),
 		MaxArchiveBytes:     reader.optionalInt64("MAX_ARCHIVE_SIZE_MB", 20) * bytesInMegabyte,
@@ -75,11 +88,13 @@ func loadSettings() (*Settings, error) {
 	if len(reader.problems) > 0 {
 		return nil, fmt.Errorf("invalid settings: %s", strings.Join(reader.problems, "; "))
 	}
-	if loadedSettings.TesterBotToken == loadedSettings.ChildBotToken {
-		return nil, ErrorSameBotTokens
+	lastChildDatabase := loadedSettings.ChildRedisDatabase + loadedSettings.ChildBotsLimit - 1
+	if loadedSettings.ChildBotsLimit < 1 || lastChildDatabase >= redisDatabaseCount {
+		return nil, ErrorTooManyChildren
 	}
 	if loadedSettings.RedisAddress == loadedSettings.ChildRedisAddress &&
-		loadedSettings.RedisDatabase == loadedSettings.ChildRedisDatabase {
+		loadedSettings.RedisDatabase >= loadedSettings.ChildRedisDatabase &&
+		loadedSettings.RedisDatabase <= lastChildDatabase {
 		return nil, ErrorSameRedisDatabase
 	}
 	return loadedSettings, nil

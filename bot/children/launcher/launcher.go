@@ -23,15 +23,16 @@ import (
 
 type Options struct {
 	ChildrenDirectory string
-	ChildBotToken     string
+	MaxChildren       int
 	ChildRedis        ChildRedis
 	ChildUser         ChildUser
+	Container         Container
 	ArchiveLimits     archive.Limits
 	BuildTimeout      time.Duration
 	StartupCheck      time.Duration
 }
 
-type ExitNotifier func(ownerID int64, exitReport string)
+type ExitNotifier func(ownerID int64, slot int, exitReport string)
 
 const (
 	reportedOutputBytes = 3000
@@ -39,6 +40,8 @@ const (
 	sourceFolderName    = "source"
 	logFileName         = "child.log"
 )
+
+var ErrorUnknownSlot = errors.New("unknown child bot slot")
 
 type LaunchError struct {
 	Stage  string
@@ -52,8 +55,10 @@ func (launchError *LaunchError) Error() string {
 
 type runningChild struct {
 	ownerID       int64
+	slot          int
 	archiveName   string
 	process       *os.Process
+	containerName string
 	output        *outputTail
 	exited        chan struct{}
 	exitError     error
@@ -63,35 +68,56 @@ type runningChild struct {
 type Launcher struct {
 	options              Options
 	childRepository      *repositories.ChildBotRepository
-	childDatabase        *redis.Client
 	notifyUnexpectedExit ExitNotifier
 
-	deployMutex sync.Mutex
-	activeMutex sync.Mutex
-	activeChild *runningChild
+	deployMutex    sync.Mutex
+	activeMutex    sync.Mutex
+	activeChildren map[int]*runningChild
 }
 
-func New(options Options, childRepository *repositories.ChildBotRepository, childDatabase *redis.Client, notifyUnexpectedExit ExitNotifier) (*Launcher, error) {
-	if err := checkChildUserSupported(options.ChildUser); err != nil {
-		return nil, err
+func New(options Options, childRepository *repositories.ChildBotRepository, notifyUnexpectedExit ExitNotifier) (*Launcher, error) {
+	if options.MaxChildren < 1 {
+		return nil, errors.New("no child bots allowed")
+	}
+	if !options.Container.Enabled() {
+		if err := checkChildUserSupported(options.ChildUser); err != nil {
+			return nil, err
+		}
 	}
 	if err := os.MkdirAll(options.ChildrenDirectory, 0o755); err != nil {
 		return nil, err
 	}
+	if options.Container.Enabled() {
+		if options.Container.Image == "" {
+			image, err := currentImage()
+			if err != nil {
+				return nil, err
+			}
+			options.Container.Image = image
+		}
+		options.Container.removeLeftovers()
+	}
 	return &Launcher{
 		options:              options,
 		childRepository:      childRepository,
-		childDatabase:        childDatabase,
 		notifyUnexpectedExit: notifyUnexpectedExit,
+		activeChildren:       map[int]*runningChild{},
 	}, nil
 }
 
-func (launcher *Launcher) Deploy(ctx context.Context, ownerID int64, archivePath, archiveName string) error {
+func (launcher *Launcher) Slots() int {
+	return launcher.options.MaxChildren
+}
+
+func (launcher *Launcher) Deploy(ctx context.Context, ownerID int64, slot int, botToken, archivePath, archiveName string) error {
+	if slot < 1 || slot > launcher.Slots() {
+		return ErrorUnknownSlot
+	}
 	launcher.deployMutex.Lock()
 	defer launcher.deployMutex.Unlock()
 
 	saveStatus := func(childStatus, lastError string) {
-		launcher.saveStatus(ownerID, archiveName, childStatus, lastError)
+		launcher.saveStatus(slot, ownerID, archiveName, childStatus, lastError)
 	}
 	failDeploy := func(deployError error) error {
 		saveStatus(models.ChildStatusFailed, deployError.Error())
@@ -103,9 +129,9 @@ func (launcher *Launcher) Deploy(ctx context.Context, ownerID int64, archivePath
 		return failDeploy(err)
 	}
 
-	launcher.StopActive()
+	launcher.Stop(slot)
 
-	workspaceDirectory := filepath.Join(launcher.options.ChildrenDirectory, strconv.FormatInt(ownerID, 10))
+	workspaceDirectory := filepath.Join(launcher.options.ChildrenDirectory, strconv.Itoa(slot))
 	sourceDirectory := filepath.Join(workspaceDirectory, sourceFolderName)
 	if err := os.RemoveAll(workspaceDirectory); err != nil {
 		return failDeploy(fmt.Errorf("clean workspace: %w", err))
@@ -118,17 +144,17 @@ func (launcher *Launcher) Deploy(ctx context.Context, ownerID int64, archivePath
 		return failDeploy(fmt.Errorf("hand over workspace: %w", err))
 	}
 
-	if err := launcher.childDatabase.FlushDB(ctx).Err(); err != nil {
+	if err := launcher.flushChildDatabase(ctx, slot); err != nil {
 		return failDeploy(fmt.Errorf("flush child database: %w", err))
 	}
 
 	saveStatus(models.ChildStatusBuilding, "")
-	binaryPath := filepath.Join(workspaceDirectory, childBinaryName())
+	binaryPath := filepath.Join(workspaceDirectory, launcher.binaryName())
 	if err := launcher.build(ctx, sourceDirectory, binaryPath); err != nil {
 		return failDeploy(err)
 	}
 
-	startedChild, err := launcher.start(ownerID, archiveName, workspaceDirectory, sourceDirectory, binaryPath)
+	startedChild, err := launcher.start(ownerID, slot, botToken, archiveName, workspaceDirectory, sourceDirectory, binaryPath)
 	if err != nil {
 		return failDeploy(&LaunchError{Stage: "запуск", Reason: err.Error()})
 	}
@@ -137,7 +163,7 @@ func (launcher *Launcher) Deploy(ctx context.Context, ownerID int64, archivePath
 	defer startupTimer.Stop()
 	select {
 	case <-startedChild.exited:
-		launcher.forgetActive(startedChild)
+		launcher.forget(startedChild)
 		if startedChild.stopRequested.Load() {
 			return failDeploy(&LaunchError{Stage: "запуск", Reason: "бот остановлен во время проверки запуска"})
 		}
@@ -147,7 +173,7 @@ func (launcher *Launcher) Deploy(ctx context.Context, ownerID int64, archivePath
 			Output: startedChild.output.String(),
 		})
 	case <-ctx.Done():
-		launcher.StopActive()
+		launcher.Stop(slot)
 		return failDeploy(ctx.Err())
 	case <-startupTimer.C:
 	}
@@ -155,6 +181,23 @@ func (launcher *Launcher) Deploy(ctx context.Context, ownerID int64, archivePath
 	saveStatus(models.ChildStatusRunning, "")
 	go launcher.watchExit(startedChild)
 	return nil
+}
+
+func (launcher *Launcher) childRedis(slot int) ChildRedis {
+	childRedis := launcher.options.ChildRedis
+	childRedis.Database += slot - 1
+	return childRedis
+}
+
+func (launcher *Launcher) flushChildDatabase(ctx context.Context, slot int) error {
+	childRedis := launcher.childRedis(slot)
+	childDatabase := redis.NewClient(&redis.Options{
+		Addr:     childRedis.Address,
+		Password: childRedis.Password,
+		DB:       childRedis.Database,
+	})
+	defer childDatabase.Close()
+	return childDatabase.FlushDB(ctx).Err()
 }
 
 func (launcher *Launcher) build(ctx context.Context, sourceDirectory, binaryPath string) error {
@@ -174,6 +217,9 @@ func (launcher *Launcher) build(ctx context.Context, sourceDirectory, binaryPath
 	buildCommand := exec.CommandContext(buildContext, "go", buildArguments...)
 	buildCommand.Dir = sourceDirectory
 	buildCommand.Env = buildEnvironment(hasModuleFile)
+	if launcher.options.Container.Enabled() {
+		buildCommand.Env = append(buildCommand.Env, "GOOS=linux")
+	}
 	buildCommand.Stdout = buildOutput
 	buildCommand.Stderr = buildOutput
 	buildCommand.WaitDelay = stopTimeout
@@ -192,32 +238,56 @@ func (launcher *Launcher) build(ctx context.Context, sourceDirectory, binaryPath
 	return nil
 }
 
-func (launcher *Launcher) start(ownerID int64, archiveName, workspaceDirectory, sourceDirectory, binaryPath string) (*runningChild, error) {
-	logFile, err := os.Create(filepath.Join(workspaceDirectory, logFileName))
+func (launcher *Launcher) childCommand(slot int, botToken, workspaceDirectory, sourceDirectory, binaryPath string) (*exec.Cmd, string, error) {
+	childVariables := childEnvironment(botToken, launcher.childRedis(slot))
+	container := launcher.options.Container
+	if !container.Enabled() {
+		childCommand := exec.Command(binaryPath)
+		childCommand.Dir = sourceDirectory
+		childCommand.Env = append(inheritedEnvironment(), childVariables...)
+		prepareProcess(childCommand, launcher.options.ChildUser)
+		return childCommand, "", nil
+	}
+
+	if err := container.prepare(slot, workspaceDirectory, childVariables); err != nil {
+		return nil, "", err
+	}
+	childCommand := exec.Command("docker", "start", "--attach", container.Name(slot))
+	childCommand.Env = inheritedEnvironment()
+	return childCommand, container.Name(slot), nil
+}
+
+func (launcher *Launcher) start(ownerID int64, slot int, botToken, archiveName, workspaceDirectory, sourceDirectory, binaryPath string) (*runningChild, error) {
+	childCommand, containerName, err := launcher.childCommand(slot, botToken, workspaceDirectory, sourceDirectory, binaryPath)
 	if err != nil {
 		return nil, err
 	}
 
+	logFile, err := os.Create(filepath.Join(workspaceDirectory, logFileName))
+	if err != nil {
+		removeContainers(containerName)
+		return nil, err
+	}
+
 	childOutput := newOutputTail(reportedOutputBytes)
-	childCommand := exec.Command(binaryPath)
-	childCommand.Dir = sourceDirectory
-	childCommand.Env = childEnvironment(launcher.options.ChildBotToken, launcher.options.ChildRedis)
 	childCommand.Stdout = io.MultiWriter(childOutput, logFile)
 	childCommand.Stderr = childCommand.Stdout
 	childCommand.WaitDelay = stopTimeout
-	prepareProcess(childCommand, launcher.options.ChildUser)
 
 	if err := childCommand.Start(); err != nil {
 		logFile.Close()
+		removeContainers(containerName)
 		return nil, err
 	}
 
 	startedChild := &runningChild{
-		ownerID:     ownerID,
-		archiveName: archiveName,
-		process:     childCommand.Process,
-		output:      childOutput,
-		exited:      make(chan struct{}),
+		ownerID:       ownerID,
+		slot:          slot,
+		archiveName:   archiveName,
+		process:       childCommand.Process,
+		containerName: containerName,
+		output:        childOutput,
+		exited:        make(chan struct{}),
 	}
 	go func() {
 		startedChild.exitError = childCommand.Wait()
@@ -226,7 +296,7 @@ func (launcher *Launcher) start(ownerID int64, archiveName, workspaceDirectory, 
 	}()
 
 	launcher.activeMutex.Lock()
-	launcher.activeChild = startedChild
+	launcher.activeChildren[slot] = startedChild
 	launcher.activeMutex.Unlock()
 	return startedChild, nil
 }
@@ -236,74 +306,94 @@ func (launcher *Launcher) watchExit(watchedChild *runningChild) {
 	if watchedChild.stopRequested.Load() {
 		return
 	}
-	launcher.forgetActive(watchedChild)
+	launcher.forget(watchedChild)
 
 	exitReport := "бот завершился (" + describeExit(watchedChild.exitError) + ")"
-	launcher.saveStatus(watchedChild.ownerID, watchedChild.archiveName, models.ChildStatusFailed, exitReport)
+	launcher.saveStatus(watchedChild.slot, watchedChild.ownerID, watchedChild.archiveName, models.ChildStatusFailed, exitReport)
 	if childOutput := watchedChild.output.String(); childOutput != "" {
 		exitReport += "\n\n" + childOutput
 	}
 	if launcher.notifyUnexpectedExit != nil {
-		launcher.notifyUnexpectedExit(watchedChild.ownerID, exitReport)
+		launcher.notifyUnexpectedExit(watchedChild.ownerID, watchedChild.slot, exitReport)
 	}
 }
 
-func (launcher *Launcher) StopActive() {
+func (launcher *Launcher) Stop(slot int) bool {
 	launcher.activeMutex.Lock()
-	stoppedChild := launcher.activeChild
-	launcher.activeChild = nil
+	stoppedChild := launcher.activeChildren[slot]
+	delete(launcher.activeChildren, slot)
 	launcher.activeMutex.Unlock()
 
 	if stoppedChild == nil {
-		return
-	}
-	stopProcess(stoppedChild)
-	launcher.saveStatus(stoppedChild.ownerID, stoppedChild.archiveName, models.ChildStatusStopped, "")
-}
-
-func (launcher *Launcher) StopOwned(ownerID int64) bool {
-	activeOwnerID, isRunning := launcher.ActiveOwner()
-	if !isRunning || activeOwnerID != ownerID {
 		return false
 	}
-	launcher.StopActive()
+	stopChild(stoppedChild)
+	launcher.saveStatus(slot, stoppedChild.ownerID, stoppedChild.archiveName, models.ChildStatusStopped, "")
 	return true
 }
 
-func (launcher *Launcher) ActiveOwner() (ownerID int64, isRunning bool) {
+func (launcher *Launcher) StopOwned(ownerID int64, slot int) bool {
+	activeOwnerID, isRunning := launcher.SlotOwner(slot)
+	if !isRunning || activeOwnerID != ownerID {
+		return false
+	}
+	return launcher.Stop(slot)
+}
+
+func (launcher *Launcher) StopAll() {
+	for slot := 1; slot <= launcher.Slots(); slot++ {
+		launcher.Stop(slot)
+	}
+}
+
+func (launcher *Launcher) SlotOwner(slot int) (ownerID int64, isRunning bool) {
 	launcher.activeMutex.Lock()
 	defer launcher.activeMutex.Unlock()
-	if launcher.activeChild == nil {
+	activeChild := launcher.activeChildren[slot]
+	if activeChild == nil {
 		return 0, false
 	}
-	return launcher.activeChild.ownerID, true
+	return activeChild.ownerID, true
 }
 
-func (launcher *Launcher) forgetActive(finishedChild *runningChild) {
+func (launcher *Launcher) forget(finishedChild *runningChild) {
 	launcher.activeMutex.Lock()
 	defer launcher.activeMutex.Unlock()
-	if launcher.activeChild == finishedChild {
-		launcher.activeChild = nil
+	if launcher.activeChildren[finishedChild.slot] == finishedChild {
+		delete(launcher.activeChildren, finishedChild.slot)
 	}
 }
 
-func (launcher *Launcher) saveStatus(ownerID int64, archiveName, childStatus, lastError string) {
+func (launcher *Launcher) saveStatus(slot int, ownerID int64, archiveName, childStatus, lastError string) {
 	saveContext, cancelSave := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancelSave()
 	err := launcher.childRepository.Upsert(saveContext, models.ChildBot{
+		Slot:        slot,
 		OwnerID:     ownerID,
 		ArchiveName: archiveName,
 		Status:      childStatus,
 		LastError:   lastError,
 	})
 	if err != nil {
-		log.Printf("save child bot %d status: %v", ownerID, err)
+		log.Printf("save child bot %d status: %v", slot, err)
 	}
 }
 
-func stopProcess(stoppedChild *runningChild) {
+func (launcher *Launcher) binaryName() string {
+	if launcher.options.Container.Enabled() {
+		return containerBinary
+	}
+	if runtime.GOOS == "windows" {
+		return "childbot.exe"
+	}
+	return "childbot"
+}
+
+func stopChild(stoppedChild *runningChild) {
 	stoppedChild.stopRequested.Store(true)
-	if err := terminateProcess(stoppedChild.process); err != nil {
+	if stoppedChild.containerName != "" {
+		exec.Command("docker", "stop", "--time", strconv.Itoa(int(stopTimeout.Seconds())), stoppedChild.containerName).Run()
+	} else if err := terminateProcess(stoppedChild.process); err != nil {
 		killProcess(stoppedChild.process)
 	}
 	stopTimer := time.NewTimer(stopTimeout)
@@ -311,7 +401,12 @@ func stopProcess(stoppedChild *runningChild) {
 	select {
 	case <-stoppedChild.exited:
 	case <-stopTimer.C:
-		killProcess(stoppedChild.process)
+		if stoppedChild.containerName != "" {
+			removeContainers(stoppedChild.containerName)
+			stoppedChild.process.Kill()
+		} else {
+			killProcess(stoppedChild.process)
+		}
 		<-stoppedChild.exited
 	}
 }
@@ -325,11 +420,4 @@ func describeExit(exitError error) string {
 		return exitError.Error()
 	}
 	return "код выхода 0"
-}
-
-func childBinaryName() string {
-	if runtime.GOOS == "windows" {
-		return "childbot.exe"
-	}
-	return "childbot"
 }

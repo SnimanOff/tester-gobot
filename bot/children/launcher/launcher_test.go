@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -17,18 +18,17 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const testChildToken = "test-token"
-
 const runningBotSource = `package main
 
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
 func main() {
-	if os.Getenv("BOT_TOKEN") != "test-token" {
+	if !strings.HasPrefix(os.Getenv("BOT_TOKEN"), "test-token-") {
 		fmt.Println("no test token")
 		os.Exit(3)
 	}
@@ -36,7 +36,7 @@ func main() {
 		fmt.Println("tester token leaked to child")
 		os.Exit(4)
 	}
-	fmt.Println("bot is running")
+	fmt.Println("bot is running with database", os.Getenv("REDIS_DB"))
 	time.Sleep(time.Hour)
 }
 `
@@ -73,7 +73,7 @@ func newLauncherFixture(test *testing.T) *launcherFixture {
 
 	fakeRedis := miniredis.RunT(test)
 	mainDatabase := redis.NewClient(&redis.Options{Addr: fakeRedis.Addr(), DB: 0})
-	childDatabase := redis.NewClient(&redis.Options{Addr: fakeRedis.Addr(), DB: 1})
+	childDatabase := redis.NewClient(&redis.Options{Addr: fakeRedis.Addr(), DB: 2})
 	test.Cleanup(func() {
 		mainDatabase.Close()
 		childDatabase.Close()
@@ -82,7 +82,7 @@ func newLauncherFixture(test *testing.T) *launcherFixture {
 	childRepository := repositories.NewChildBotRepository(mainDatabase)
 	testedLauncher, err := New(Options{
 		ChildrenDirectory: filepath.Join(test.TempDir(), "children"),
-		ChildBotToken:     testChildToken,
+		MaxChildren:       2,
 		ChildRedis:        ChildRedis{Address: fakeRedis.Addr(), Database: 1},
 		ChildUser:         ChildUser{UID: -1, GID: -1},
 		ArchiveLimits: archive.Limits{
@@ -93,11 +93,11 @@ func newLauncherFixture(test *testing.T) *launcherFixture {
 		},
 		BuildTimeout: 2 * time.Minute,
 		StartupCheck: 2 * time.Second,
-	}, childRepository, childDatabase, nil)
+	}, childRepository, nil)
 	if err != nil {
 		test.Fatal(err)
 	}
-	test.Cleanup(testedLauncher.StopActive)
+	test.Cleanup(testedLauncher.StopAll)
 	return &launcherFixture{launcher: testedLauncher, childRepository: childRepository, childDatabase: childDatabase}
 }
 
@@ -127,9 +127,9 @@ func writeBotArchive(test *testing.T, archiveFiles map[string]string) string {
 	return archivePath
 }
 
-func (fixture *launcherFixture) requireStatus(test *testing.T, ownerID int64, expectedStatus string) models.ChildBot {
+func (fixture *launcherFixture) requireStatus(test *testing.T, slot int, expectedStatus string) models.ChildBot {
 	test.Helper()
-	childBot, err := fixture.childRepository.GetByOwnerID(context.Background(), ownerID)
+	childBot, err := fixture.childRepository.GetBySlot(context.Background(), slot)
 	if err != nil || childBot.Status != expectedStatus {
 		test.Fatalf("expected status %q, got %+v (err=%v)", expectedStatus, childBot, err)
 	}
@@ -146,38 +146,63 @@ func TestRunningBotIsStartedAndStopped(test *testing.T) {
 		"main.go": runningBotSource,
 		"go.mod":  "module childbot\n\ngo 1.22\n",
 	})
-	if err := fixture.launcher.Deploy(ctx, ownerID, archivePath, "bot.zip"); err != nil {
+	if err := fixture.launcher.Deploy(ctx, ownerID, 2, "test-token-2", archivePath, "bot.zip"); err != nil {
 		test.Fatalf("working bot did not start: %v", describeTestError(err))
 	}
-	fixture.requireStatus(test, ownerID, models.ChildStatusRunning)
+	fixture.requireStatus(test, 2, models.ChildStatusRunning)
 	if keyCount := fixture.childDatabase.DBSize(ctx).Val(); keyCount != 0 {
 		test.Fatalf("child database not flushed: %d keys", keyCount)
 	}
 
-	if activeOwnerID, isRunning := fixture.launcher.ActiveOwner(); !isRunning || activeOwnerID != ownerID {
+	if activeOwnerID, isRunning := fixture.launcher.SlotOwner(2); !isRunning || activeOwnerID != ownerID {
 		test.Fatalf("active bot: owner=%d running=%v", activeOwnerID, isRunning)
 	}
-	if fixture.launcher.StopOwned(ownerID + 1) {
+	if fixture.launcher.StopOwned(ownerID+1, 2) {
 		test.Fatal("other admin stopped the bot")
 	}
-	if !fixture.launcher.StopOwned(ownerID) {
+	if !fixture.launcher.StopOwned(ownerID, 2) {
 		test.Fatal("owner could not stop the bot")
 	}
-	fixture.requireStatus(test, ownerID, models.ChildStatusStopped)
+	fixture.requireStatus(test, 2, models.ChildStatusStopped)
+}
+
+func TestBotsRunInSeparateSlots(test *testing.T) {
+	fixture := newLauncherFixture(test)
+	ctx := context.Background()
+	archivePath := writeBotArchive(test, map[string]string{"main.go": runningBotSource})
+
+	for slot := 1; slot <= 2; slot++ {
+		if err := fixture.launcher.Deploy(ctx, 7, slot, "test-token-"+strconv.Itoa(slot), archivePath, "bot.zip"); err != nil {
+			test.Fatalf("bot %d did not start: %v", slot, describeTestError(err))
+		}
+	}
+	for slot := 1; slot <= 2; slot++ {
+		if _, isRunning := fixture.launcher.SlotOwner(slot); !isRunning {
+			test.Fatalf("bot %d is not running", slot)
+		}
+	}
+	fixture.requireStatus(test, 1, models.ChildStatusRunning)
+	fixture.requireStatus(test, 2, models.ChildStatusRunning)
+
+	if err := fixture.launcher.Deploy(ctx, 7, 3, "test-token-3", archivePath, "bot.zip"); !errors.Is(err, ErrorUnknownSlot) {
+		test.Fatalf("expected ErrorUnknownSlot, got %v", err)
+	}
+	fixture.launcher.StopAll()
+	fixture.requireStatus(test, 1, models.ChildStatusStopped)
 }
 
 func TestCrashingBotReportsError(test *testing.T) {
 	fixture := newLauncherFixture(test)
 	archivePath := writeBotArchive(test, map[string]string{"main.go": crashingBotSource})
 
-	deployError := fixture.launcher.Deploy(context.Background(), 8, archivePath, "bot.zip")
+	deployError := fixture.launcher.Deploy(context.Background(), 8, 1, "test-token-1", archivePath, "bot.zip")
 	var launchError *LaunchError
 	if !errors.As(deployError, &launchError) || launchError.Stage != "запуск" || !strings.Contains(launchError.Output, "invalid token") {
 		test.Fatalf("expected launch error with bot output, got: %v", describeTestError(deployError))
 	}
 	test.Logf("user reply: %s\n%s", launchError.Error(), launchError.Output)
-	fixture.requireStatus(test, 8, models.ChildStatusFailed)
-	if _, isRunning := fixture.launcher.ActiveOwner(); isRunning {
+	fixture.requireStatus(test, 1, models.ChildStatusFailed)
+	if _, isRunning := fixture.launcher.SlotOwner(1); isRunning {
 		test.Fatal("crashed bot is still active")
 	}
 }
@@ -186,13 +211,13 @@ func TestBrokenBotReportsBuildError(test *testing.T) {
 	fixture := newLauncherFixture(test)
 	archivePath := writeBotArchive(test, map[string]string{"main.go": brokenBotSource})
 
-	deployError := fixture.launcher.Deploy(context.Background(), 9, archivePath, "bot.zip")
+	deployError := fixture.launcher.Deploy(context.Background(), 9, 1, "test-token-1", archivePath, "bot.zip")
 	var launchError *LaunchError
 	if !errors.As(deployError, &launchError) || launchError.Stage != "сборка" || !strings.Contains(launchError.Output, "undefinedFunction") {
 		test.Fatalf("expected build error, got: %v", describeTestError(deployError))
 	}
 	test.Logf("user reply: %s\n%s", launchError.Error(), launchError.Output)
-	fixture.requireStatus(test, 9, models.ChildStatusFailed)
+	fixture.requireStatus(test, 1, models.ChildStatusFailed)
 }
 
 func describeTestError(deployError error) string {

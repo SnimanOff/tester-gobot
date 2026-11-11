@@ -43,7 +43,7 @@ func StartCommand(userRepository *repositories.UserRepository, ownerTelegramID i
 			sendText(ctx, tgBot, chatID, startText+"Загрузка доступна администраторам.")
 			return
 		}
-		startText += "Отправьте ZIP с main.go в корне.\n/status\n/stop\n/admins"
+		startText += "/newbot - создать тестового бота\nЗатем отправьте ZIP с main.go в корне.\n/status\n/stop\n/admins"
 		if from.ID == ownerTelegramID {
 			startText += "\n/add_admin <ID или @username>\n/remove_admin <ID или @username>"
 		}

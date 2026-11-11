@@ -21,13 +21,13 @@ func NewChildBotRepository(redisClient *redis.Client) *ChildBotRepository {
 
 func (repository *ChildBotRepository) Upsert(ctx context.Context, childBot models.ChildBot) error {
 	childBot.UpdatedAt = time.Now().Unix()
-	return repository.redisClient.HSet(ctx, models.ChildBotKey(childBot.OwnerID), childBot).Err()
+	return repository.redisClient.HSet(ctx, models.ChildBotKey(childBot.Slot), childBot).Err()
 }
 
-func (repository *ChildBotRepository) GetByOwnerID(ctx context.Context, ownerID int64) (models.ChildBot, error) {
+func (repository *ChildBotRepository) GetBySlot(ctx context.Context, slot int) (models.ChildBot, error) {
 	var childBot models.ChildBot
 
-	childBotCommand := repository.redisClient.HGetAll(ctx, models.ChildBotKey(ownerID))
+	childBotCommand := repository.redisClient.HGetAll(ctx, models.ChildBotKey(slot))
 	if err := childBotCommand.Err(); err != nil {
 		return models.ChildBot{}, err
 	}

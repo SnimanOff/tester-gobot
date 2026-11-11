@@ -2,6 +2,9 @@ package commands
 
 import (
 	"context"
+	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/SnimanOff/testbot-platform/bot/children/launcher"
 	telegram "github.com/go-telegram/bot"
@@ -17,20 +20,37 @@ func StopChildCommand(childLauncher *launcher.Launcher, ownerTelegramID int64) t
 		from := update.Message.From
 		chatID := update.Message.Chat.ID
 
-		isStopped := false
-		if from.ID == ownerTelegramID {
-			if _, isRunning := childLauncher.ActiveOwner(); isRunning {
-				childLauncher.StopActive()
-				isStopped = true
+		slots := make([]int, 0, childLauncher.Slots())
+		if _, slotText, hasSlot := strings.Cut(strings.TrimSpace(update.Message.Text), " "); hasSlot {
+			slot, err := strconv.Atoi(strings.TrimSpace(slotText))
+			if err != nil || slot < 1 || slot > childLauncher.Slots() {
+				sendText(ctx, tgBot, chatID, fmt.Sprintf("Номер бота должен быть от 1 до %d.", childLauncher.Slots()))
+				return
 			}
+			slots = append(slots, slot)
 		} else {
-			isStopped = childLauncher.StopOwned(from.ID)
+			for slot := 1; slot <= childLauncher.Slots(); slot++ {
+				slots = append(slots, slot)
+			}
 		}
 
-		if !isStopped {
-			sendText(ctx, tgBot, chatID, "Нет запущенного бота.")
+		var stoppedSlots []string
+		for _, slot := range slots {
+			isStopped := false
+			if from.ID == ownerTelegramID {
+				isStopped = childLauncher.Stop(slot)
+			} else {
+				isStopped = childLauncher.StopOwned(from.ID, slot)
+			}
+			if isStopped {
+				stoppedSlots = append(stoppedSlots, strconv.Itoa(slot))
+			}
+		}
+
+		if len(stoppedSlots) == 0 {
+			sendText(ctx, tgBot, chatID, "Нет запущенных ботов.")
 			return
 		}
-		sendText(ctx, tgBot, chatID, "Бот остановлен.")
+		sendText(ctx, tgBot, chatID, "Остановлены боты: "+strings.Join(stoppedSlots, ", ")+".")
 	}
 }

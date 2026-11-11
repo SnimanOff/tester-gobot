@@ -18,6 +18,9 @@ services:
   child-redis:
     image: redis:7.4-alpine
     command: ["redis-server", "--save", "", "--appendonly", "no"]
+    networks:
+      - default
+      - children
     ports:
       - "127.0.0.1:6380:6379"
     healthcheck:
@@ -37,6 +40,7 @@ services:
       CHILD_REDIS_DB: "0"
       CHILD_RUN_UID: "10001"
       CHILD_RUN_GID: "10001"
+      CHILD_CONTAINER_PREFIX: ${COMPOSE_PROJECT_NAME}
       CHILDREN_DIR: /app/data/children
     depends_on:
       redis:
@@ -46,7 +50,11 @@ services:
     volumes:
       - children-data:/app/data
       - child-go-cache:/var/lib/childbot
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
+
+networks:
+  children:
 
 volumes:
   redis-data:

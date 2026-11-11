@@ -6,7 +6,7 @@ COPY . .
 RUN CGO_ENABLED=0 go build -o /out/tester-bot ./bot/tester
 
 FROM golang:1.27-alpine
-RUN apk add --no-cache ca-certificates tzdata \
+RUN apk add --no-cache ca-certificates tzdata docker-cli \
     && addgroup -g 10001 childbot \
     && adduser -D -u 10001 -G childbot -h /var/lib/childbot childbot \
     && mkdir -p /var/lib/childbot/go /var/lib/childbot/cache /app/data/children \

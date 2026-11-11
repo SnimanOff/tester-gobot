@@ -7,7 +7,6 @@ import (
 	"log"
 	"strings"
 
-	"github.com/SnimanOff/testbot-platform/bot/children/launcher"
 	databaseModels "github.com/SnimanOff/testbot-platform/database/models"
 	"github.com/SnimanOff/testbot-platform/database/repositories"
 	telegram "github.com/go-telegram/bot"
@@ -22,39 +21,44 @@ var childStatusTitles = map[string]string{
 	databaseModels.ChildStatusStopped:  "остановлен",
 }
 
-func ChildStatusCommand(childRepository *repositories.ChildBotRepository, childLauncher *launcher.Launcher, childBotUsername string) telegram.HandlerFunc {
+func ChildStatusCommand(childRepository *repositories.ChildBotRepository, managedBotRepository *repositories.ManagedBotRepository) telegram.HandlerFunc {
 	return func(ctx context.Context, tgBot *telegram.Bot, update *models.Update) {
 		if update.Message == nil || update.Message.From == nil {
 			return
 		}
 
-		from := update.Message.From
 		chatID := update.Message.Chat.ID
 
-		childBot, err := childRepository.GetByOwnerID(ctx, from.ID)
-		isNotFound := errors.Is(err, repositories.ErrorChildBotNotFound)
-		if err != nil && !isNotFound {
-			log.Printf("get child bot %d: %v", from.ID, err)
+		managedBots, err := managedBotRepository.List(ctx)
+		if err != nil {
+			log.Printf("list managed bots: %v", err)
 			sendText(ctx, tgBot, chatID, "Ошибка получения статуса.")
+			return
+		}
+		if len(managedBots) == 0 {
+			sendText(ctx, tgBot, chatID, "Тестовых ботов нет. Создайте бота: /newbot")
 			return
 		}
 
 		var statusText strings.Builder
-		if isNotFound {
-			statusText.WriteString("Бот не загружен.")
-		} else {
-			fmt.Fprintf(&statusText, "Архив: %s\n", childBot.ArchiveName)
-			fmt.Fprintf(&statusText, "Статус: %s\n", childStatusTitles[childBot.Status])
+		for _, managedBot := range managedBots {
+			fmt.Fprintf(&statusText, "%d. @%s - ", managedBot.Number, managedBot.Username)
+
+			childBot, err := childRepository.GetBySlot(ctx, managedBot.Number)
+			if errors.Is(err, repositories.ErrorChildBotNotFound) {
+				statusText.WriteString("архив не загружен\n")
+				continue
+			}
+			if err != nil {
+				log.Printf("get child bot %d: %v", managedBot.Number, err)
+				sendText(ctx, tgBot, chatID, "Ошибка получения статуса.")
+				return
+			}
+
+			fmt.Fprintf(&statusText, "%s, %s\n", childStatusTitles[childBot.Status], childBot.ArchiveName)
 			if childBot.LastError != "" {
 				fmt.Fprintf(&statusText, "Причина: %s\n", childBot.LastError)
 			}
-			if childBot.Status == databaseModels.ChildStatusRunning {
-				fmt.Fprintf(&statusText, "Бот: @%s\n", childBotUsername)
-			}
-		}
-
-		if activeOwnerID, isRunning := childLauncher.ActiveOwner(); isRunning && activeOwnerID != from.ID {
-			fmt.Fprintf(&statusText, "\nТокен занят: %d. Новая загрузка остановит бота.", activeOwnerID)
 		}
 		sendText(ctx, tgBot, chatID, statusText.String())
 	}

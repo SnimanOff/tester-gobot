@@ -10,12 +10,12 @@ import (
 )
 
 type Dependencies struct {
-	UserRepository   *repositories.UserRepository
-	ChildRepository  *repositories.ChildBotRepository
-	ChildLauncher    *launcher.Launcher
-	OwnerTelegramID  int64
-	ChildBotUsername string
-	MaxArchiveBytes  int64
+	UserRepository       *repositories.UserRepository
+	ChildRepository      *repositories.ChildBotRepository
+	ChildLauncher        *launcher.Launcher
+	OwnerTelegramID      int64
+	ManagedBotRepository *repositories.ManagedBotRepository
+	MaxArchiveBytes      int64
 }
 
 func Register(tgBot *telegram.Bot, dependencies Dependencies) {
@@ -41,8 +41,23 @@ func Register(tgBot *telegram.Bot, dependencies Dependencies) {
 		telegram.HandlerTypeMessageText,
 		"status",
 		telegram.MatchTypeCommandStartOnly,
-		commands.ChildStatusCommand(dependencies.ChildRepository, dependencies.ChildLauncher, dependencies.ChildBotUsername),
+		commands.ChildStatusCommand(dependencies.ChildRepository, dependencies.ManagedBotRepository),
 		onlyAdmins,
+	)
+
+	tgBot.RegisterHandler(
+		telegram.HandlerTypeMessageText,
+		"newbot",
+		telegram.MatchTypeCommandStartOnly,
+		commands.NewBotCommand(),
+		onlyAdmins,
+	)
+
+	tgBot.RegisterHandlerMatchFunc(
+		func(update *models.Update) bool {
+			return update.ManagedBot != nil
+		},
+		commands.ManagedBotUpdate(dependencies.ManagedBotRepository, dependencies.UserRepository, dependencies.ChildLauncher, dependencies.OwnerTelegramID),
 	)
 
 	tgBot.RegisterHandler(
@@ -73,7 +88,7 @@ func Register(tgBot *telegram.Bot, dependencies Dependencies) {
 		func(update *models.Update) bool {
 			return update.Message != nil && update.Message.Document != nil
 		},
-		commands.UploadArchiveCommand(dependencies.ChildLauncher, dependencies.MaxArchiveBytes, dependencies.ChildBotUsername),
+		commands.UploadArchiveCommand(dependencies.ChildLauncher, dependencies.ManagedBotRepository, dependencies.MaxArchiveBytes, dependencies.OwnerTelegramID),
 		onlyAdmins,
 	)
 }

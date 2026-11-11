@@ -3,6 +3,7 @@ package models
 import "strconv"
 
 type ChildBot struct {
+	Slot        int    `redis:"slot"`
 	OwnerID     int64  `redis:"owner_id"`
 	ArchiveName string `redis:"archive_name"`
 	Status      string `redis:"status"`
@@ -26,6 +27,6 @@ const (
 
 const ChildBotKeyPattern = "child_bot:*"
 
-func ChildBotKey(ownerID int64) string {
-	return "child_bot:" + strconv.FormatInt(ownerID, 10)
+func ChildBotKey(slot int) string {
+	return "child_bot:" + strconv.Itoa(slot)
 }
